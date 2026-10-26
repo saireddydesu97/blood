@@ -1,0 +1,9 @@
+flask>=3.0.0
+flask-cors>=4.0.0
+pillow>=10.2.0
+numpy>=1.26.0
+# Install the ML framework matching your trained model file (.h5/.keras, .pth/.pt, or .pkl):
+# tensorflow>=2.15.0
+# torch>=2.2.0
+# scikit-learn>=1.4.0
+# joblib>=1.3.2
