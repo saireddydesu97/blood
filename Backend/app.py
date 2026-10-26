@@ -1,8 +1,11 @@
-
 import io
 import json
 import os
 from pathlib import Path
+
+# Configure TensorFlow for lightweight CPU-only inference before TF is imported
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("CUDA_VISIBLE_DEVICES", "-1")
 
 import numpy as np
 from flask import Flask, jsonify, request
@@ -12,7 +15,12 @@ from PIL import Image, UnidentifiedImageError
 app = Flask(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
-MODEL_DIR = BASE_DIR / "models"
+ROOT_MODEL_DIR = BASE_DIR.parent / "models"
+MODEL_DIR = (
+    ROOT_MODEL_DIR
+    if (ROOT_MODEL_DIR / "hemoscan_cnn.keras").exists()
+    else BASE_DIR / "models"
+)
 
 MODEL_PATH = MODEL_DIR / "hemoscan_cnn.keras"
 CLASSES_PATH = MODEL_DIR / "classes.json"
@@ -56,6 +64,13 @@ def load_model():
     try:
         import tensorflow as tf
 
+        try:
+            tf.config.threading.set_intra_op_parallelism_threads(2)
+            tf.config.threading.set_inter_op_parallelism_threads(1)
+        except RuntimeError:
+            # Threading config already initialized in this process
+            pass
+
         if not MODEL_PATH.exists():
             raise FileNotFoundError(
                 f"Model file not found: {MODEL_PATH}"
@@ -66,7 +81,7 @@ def load_model():
                 f"Class file not found: {CLASSES_PATH}"
             )
 
-        loaded_model = tf.keras.models.load_model(MODEL_PATH)
+        loaded_model = tf.keras.models.load_model(MODEL_PATH, compile=False)
 
         loaded_classes = json.loads(
             CLASSES_PATH.read_text(encoding="utf-8")
@@ -91,6 +106,10 @@ def load_model():
             raise ValueError(
                 f"Unexpected model input shape: {loaded_model.input_shape}"
             )
+
+        # Warm up eager forward pass once at startup so the first /predict request is fast
+        warmup_batch = np.zeros((1, IMG_SIZE, IMG_SIZE, 3), dtype=np.float32)
+        _ = loaded_model(warmup_batch, training=False)
 
         model = loaded_model
         classes = loaded_classes
@@ -193,10 +212,14 @@ def predict():
         }), 400
 
     try:
-        predictions = np.asarray(
-            model.predict(image_array[None, ...], verbose=0)[0],
-            dtype=np.float64
+        batch = np.expand_dims(image_array, axis=0)
+        raw_output = model(batch, training=False)
+        output_np = (
+            raw_output.numpy()
+            if hasattr(raw_output, "numpy")
+            else np.asarray(raw_output)
         )
+        predictions = np.asarray(output_np[0], dtype=np.float64)
 
         if (
             predictions.shape != (len(classes),)
